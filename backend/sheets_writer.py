@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import gspread
+from gspread.utils import rowcol_to_a1
 from google.oauth2.service_account import Credentials
 
 
@@ -135,12 +136,9 @@ def write_results(
             simplify_links=True,
         )
 
-        ws_int.update(
-            row=1,
-            col=col_cursor,
-            values=block,
-            value_input_option="USER_ENTERED",
-        )
+        start_cell = rowcol_to_a1(1, col_cursor)  # row 1, column col_cursor
+        ws_int.update(start_cell, block, value_input_option="USER_ENTERED")
+
 
         col_cursor += 3  # 2 cols data + 1 spacer
 
@@ -155,11 +153,8 @@ def write_results(
             simplify_links=False,
         )
 
-        ws_ext.update(
-            row=1,
-            col=col_cursor,
-            values=block,
-            value_input_option="USER_ENTERED",
-        )
+        start_cell = rowcol_to_a1(1, col_cursor)
+        ws_ext.update(start_cell, block, value_input_option="USER_ENTERED")
+
 
         col_cursor += 3
