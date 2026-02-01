@@ -5,39 +5,36 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 
-def _service_account_path_from_env() -> str:
-    """
-    Supports two modes:
-    1) GSHEETS_KEY_JSON: full service account JSON pasted into an env var (best for Render)
-    2) GSHEETS_KEY_PATH: path to a local JSON file (your current local setup)
-    """
-    key_json = os.environ.get("GSHEETS_KEY_JSON")
-    if key_json and key_json.strip():
-        data = json.loads(key_json)
-        fd, path = tempfile.mkstemp(prefix="gsheets_", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        return path
-
-    key_path = os.environ.get("GSHEETS_KEY_PATH")
-    if key_path and Path(key_path).exists():
-        return key_path
-
-    raise RuntimeError("Missing Google Sheets credentials. Set GSHEETS_KEY_JSON (preferred) or GSHEETS_KEY_PATH.")
-
+# ─────────────────────────────────────────────────────────────
+# Auth helpers
+# ─────────────────────────────────────────────────────────────
 
 def _client_from_env() -> gspread.Client:
-    key_path = _service_account_path_from_env()
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file(key_path, scopes=scopes)
+
+    key_json = os.environ.get("GSHEETS_KEY_JSON")
+    key_path = os.environ.get("GSHEETS_KEY_PATH")
+
+    if key_json:
+        creds_dict = json.loads(key_json)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    elif key_path and Path(key_path).exists():
+        creds = Credentials.from_service_account_file(key_path, scopes=scopes)
+    else:
+        raise RuntimeError(
+            "Missing Google Sheets credentials. "
+            "Set GSHEETS_KEY_JSON (preferred) or GSHEETS_KEY_PATH."
+        )
+
     return gspread.authorize(creds)
 
 
@@ -45,31 +42,73 @@ def _ensure_worksheet(sh, title: str) -> gspread.Worksheet:
     try:
         return sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        return sh.add_worksheet(title=title, rows=2000, cols=10)
+        return sh.add_worksheet(title=title, rows=2000, cols=200)
 
 
-def _block_rows(source_url: str, header_left: str, header_right: str, data: Dict[str, List[str]]) -> List[List[str]]:
+# ─────────────────────────────────────────────────────────────
+# Formatting helpers
+# ─────────────────────────────────────────────────────────────
+
+def _simplify_internal_display(url: str) -> str:
     """
-    data: link -> [anchor texts]
-    We aggregate anchors into one cell joined by " | "
+    https://www.casinos.com/us/slots -> /us/slots
+    """
+    try:
+        parsed = urlparse(url)
+        return parsed.path or "/"
+    except Exception:
+        return url
+
+
+def _simplify_external_display(url: str) -> str:
+    """
+    https://example.com/path -> example.com
+    """
+    try:
+        return urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+def _build_block_columns(
+    source_url: str,
+    header_left: str,
+    header_right: str,
+    data: Dict[str, List[str]],
+    simplify_links: bool,
+) -> List[List[str]]:
+    """
+    Returns a vertical table (list of rows) for ONE source URL.
     """
     rows: List[List[str]] = []
-    rows.append([f"SOURCE URL: {source_url}", ""])
+
+    # Title row (just the URL)
+    rows.append([source_url, ""])
     rows.append([header_left, header_right])
 
     if not data:
         rows.append(["(no links found)", ""])
-        rows.append(["", ""])
         return rows
 
     for link in sorted(data.keys()):
-        anchors = [t for t in data[link] if t is not None]
-        anchors_joined = " | ".join([a for a in anchors if a != ""])
-        rows.append([link, anchors_joined])
+        anchors = [t for t in data[link] if t]
+        anchor_text = " | ".join(anchors)
 
-    rows.append(["", ""])  # blank line between blocks
+        if simplify_links:
+            display = _simplify_internal_display(link)
+            cell = f'=HYPERLINK("{link}", "{display}")'
+        else:
+            display = _simplify_external_display(link)
+            cell = f'=HYPERLINK("{link}", "{display}")'
+
+        rows.append([cell, anchor_text])
+
     return rows
 
+
+# ─────────────────────────────────────────────────────────────
+# Main writer
+# ─────────────────────────────────────────────────────────────
 
 def write_results(
     spreadsheet_id: str,
@@ -85,15 +124,42 @@ def write_results(
     ws_int.clear()
     ws_ext.clear()
 
-    int_rows: List[List[str]] = []
+    # ───────── INTERNAL LINKS (horizontal layout)
+    col_cursor = 1  # column A
     for source_url, data in internal_blocks:
-        int_rows.extend(_block_rows(source_url, "INTERNAL LINK", "INT. ANCHOR TEXT", data))
+        block = _build_block_columns(
+            source_url=source_url,
+            header_left="INTERNAL LINK",
+            header_right="ANCHOR TEXT",
+            data=data,
+            simplify_links=True,
+        )
 
-    ext_rows: List[List[str]] = []
+        ws_int.update(
+            row=1,
+            col=col_cursor,
+            values=block,
+            value_input_option="USER_ENTERED",
+        )
+
+        col_cursor += 3  # 2 cols data + 1 spacer
+
+    # ───────── EXTERNAL LINKS (horizontal layout)
+    col_cursor = 1
     for source_url, data in external_blocks:
-        ext_rows.extend(_block_rows(source_url, "EXTERNAL LINK", "EXT. ANCHOR TEXT", data))
+        block = _build_block_columns(
+            source_url=source_url,
+            header_left="EXTERNAL LINK",
+            header_right="ANCHOR TEXT",
+            data=data,
+            simplify_links=False,
+        )
 
-    if int_rows:
-        ws_int.update("A1", int_rows, value_input_option="RAW")
-    if ext_rows:
-        ws_ext.update("A1", ext_rows, value_input_option="RAW")
+        ws_ext.update(
+            row=1,
+            col=col_cursor,
+            values=block,
+            value_input_option="USER_ENTERED",
+        )
+
+        col_cursor += 3
