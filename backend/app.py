@@ -13,16 +13,12 @@ from scraper import split_inputs, normalize_to_casinos, scrape_links
 from sheets_writer import write_results
 
 
-# -----------------------------
-# Auth (HTTP Basic)
-# -----------------------------
 security = HTTPBasic()
 
 def require_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
     user = os.environ.get("APP_USER", "")
     pwd = os.environ.get("APP_PASS", "")
     if not user or not pwd:
-        # Fail closed if auth not configured on server
         raise HTTPException(status_code=500, detail="Server auth not configured")
 
     ok_user = secrets.compare_digest(credentials.username, user)
@@ -38,17 +34,13 @@ def require_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
 app = FastAPI(title="Casinos.com Link Scraper")
 
 
-# -----------------------------
-# Request model
-# -----------------------------
 class ScrapeRequest(BaseModel):
-    raw_text: Optional[str] = Field(
-        default=None,
-        description="Paste URLs/paths exactly as copied (newlines/tabs ok).",
-    )
-    urls: Optional[List[str]] = Field(
-        default=None,
-        description="Explicit list of URLs/paths.",
+    raw_text: Optional[str] = Field(default=None)
+    urls: Optional[List[str]] = Field(default=None)
+
+    ignore_header_footer: bool = Field(
+        default=False,
+        description="If true, ignore links found inside <header>, <footer>, and <nav>.",
     )
 
 
@@ -60,9 +52,6 @@ def gather_inputs(req: ScrapeRequest) -> List[str]:
     return []
 
 
-# -----------------------------
-# API
-# -----------------------------
 @app.post("/scrape", dependencies=[Depends(require_auth)])
 async def scrape(req: ScrapeRequest) -> Dict[str, Any]:
     urls_in = gather_inputs(req)
@@ -70,7 +59,6 @@ async def scrape(req: ScrapeRequest) -> Dict[str, Any]:
     if not (1 <= len(urls_in) <= 150):
         raise HTTPException(status_code=400, detail="Provide between 1 and 150 URLs/paths.")
 
-    # Dedupe while preserving order (Excel duplicates happen)
     urls_in = list(dict.fromkeys(urls_in))
 
     normalized: List[str] = []
@@ -90,7 +78,7 @@ async def scrape(req: ScrapeRequest) -> Dict[str, Any]:
 
     for u in normalized:
         try:
-            page = await scrape_links(u)
+            page = await scrape_links(u, ignore_header_footer=req.ignore_header_footer)
             internal_blocks.append((page.source_url, page.internal))
             external_blocks.append((page.source_url, page.external))
         except Exception as e:
@@ -115,9 +103,6 @@ async def scrape(req: ScrapeRequest) -> Dict[str, Any]:
     }
 
 
-# -----------------------------
-# UI
-# -----------------------------
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 def home():
     return """
@@ -128,7 +113,6 @@ def home():
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Links Input</title>
 
-    <!-- Modern font -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -142,8 +126,6 @@ def home():
         --shadow: 0 18px 60px rgba(15, 18, 34, 0.12);
         --shadow-soft: 0 10px 30px rgba(15, 18, 34, 0.10);
         --radius: 18px;
-
-        /* more pink-dominant gradient */
         --grad: linear-gradient(90deg, #ff2aa6 0%, #ff2aa6 40%, #b400ff 100%);
       }
 
@@ -172,8 +154,6 @@ def home():
         font-size: 42px;
         font-weight: 800;
         letter-spacing: -0.02em;
-
-        /* gradient text */
         background: var(--grad);
         -webkit-background-clip: text;
         background-clip: text;
@@ -212,15 +192,26 @@ def home():
         line-height: 1.45;
       }
 
-      textarea::placeholder{
-        color: #9aa2b1;
-      }
-
       .row {
         margin-top: 14px;
+        display: grid;
+        gap: 10px;
+        place-items: center;
+      }
+
+      .toggle {
         display: flex;
         align-items: center;
-        justify-content: center;
+        gap: 10px;
+        font-size: 13px;
+        color: var(--muted);
+        user-select: none;
+      }
+
+      .toggle input {
+        width: 18px;
+        height: 18px;
+        accent-color: #ff2aa6;
       }
 
       .btn {
@@ -238,12 +229,7 @@ def home():
 
       .btn:hover { filter: brightness(1.03); }
       .btn:active { transform: translateY(1px); }
-      .btn:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
-        filter: none;
-        transform: none;
-      }
+      .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
       .status {
         margin-top: 14px;
@@ -273,6 +259,11 @@ us/poker
 us/blackjack"></textarea>
 
         <div class="row">
+          <label class="toggle">
+            <input id="ignoreHF" type="checkbox" />
+            Ignore links in headers/footers/nav
+          </label>
+
           <button id="run" class="btn">Generate</button>
         </div>
 
@@ -284,6 +275,7 @@ us/blackjack"></textarea>
       const btn = document.getElementById("run");
       const out = document.getElementById("out");
       const ta  = document.getElementById("raw");
+      const ignoreHF = document.getElementById("ignoreHF");
 
       function countLines(text) {
         return text.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean).length;
@@ -301,14 +293,8 @@ us/blackjack"></textarea>
 
       btn.addEventListener("click", async () => {
         const n = countLines(ta.value);
-        if (n < 1) {
-          setStatus("Please paste at least 1 URL/path.", true);
-          return;
-        }
-        if (n > 150) {
-          setStatus("Too many lines. Max is 150.", true);
-          return;
-        }
+        if (n < 1) return setStatus("Please paste at least 1 URL/path.", true);
+        if (n > 150) return setStatus("Too many lines. Max is 150.", true);
 
         setButtonLoading(true);
         setStatus("Running... This may take a moment.", true);
@@ -317,7 +303,10 @@ us/blackjack"></textarea>
           const res = await fetch("/scrape", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ raw_text: ta.value })
+            body: JSON.stringify({
+              raw_text: ta.value,
+              ignore_header_footer: ignoreHF.checked
+            })
           });
 
           const data = await res.json();

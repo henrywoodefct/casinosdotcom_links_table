@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 import json
 import os
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -11,10 +10,6 @@ import gspread
 from gspread.utils import rowcol_to_a1
 from google.oauth2.service_account import Credentials
 
-
-# ─────────────────────────────────────────────────────────────
-# Auth helpers
-# ─────────────────────────────────────────────────────────────
 
 def _client_from_env() -> gspread.Client:
     scopes = [
@@ -46,14 +41,7 @@ def _ensure_worksheet(sh, title: str) -> gspread.Worksheet:
         return sh.add_worksheet(title=title, rows=2000, cols=200)
 
 
-# ─────────────────────────────────────────────────────────────
-# Formatting helpers
-# ─────────────────────────────────────────────────────────────
-
 def _simplify_internal_display(url: str) -> str:
-    """
-    https://www.casinos.com/us/slots -> /us/slots
-    """
     try:
         parsed = urlparse(url)
         return parsed.path or "/"
@@ -62,9 +50,6 @@ def _simplify_internal_display(url: str) -> str:
 
 
 def _simplify_external_display(url: str) -> str:
-    """
-    https://example.com/path -> example.com
-    """
     try:
         return urlparse(url).netloc or url
     except Exception:
@@ -78,12 +63,8 @@ def _build_block_columns(
     data: Dict[str, List[str]],
     simplify_links: bool,
 ) -> List[List[str]]:
-    """
-    Returns a vertical table (list of rows) for ONE source URL.
-    """
     rows: List[List[str]] = []
 
-    # Title row (just the URL)
     rows.append([source_url, ""])
     rows.append([header_left, header_right])
 
@@ -107,10 +88,6 @@ def _build_block_columns(
     return rows
 
 
-# ─────────────────────────────────────────────────────────────
-# Main writer
-# ─────────────────────────────────────────────────────────────
-
 def write_results(
     spreadsheet_id: str,
     internal_blocks: List[Tuple[str, Dict[str, List[str]]]],
@@ -125,7 +102,7 @@ def write_results(
     ws_int.clear()
     ws_ext.clear()
 
-    # ───────── INTERNAL LINKS (horizontal layout)
+    # INTERNAL (horizontal, no spacer)
     col_cursor = 1  # column A
     for source_url, data in internal_blocks:
         block = _build_block_columns(
@@ -135,14 +112,11 @@ def write_results(
             data=data,
             simplify_links=True,
         )
-
-        start_cell = rowcol_to_a1(1, col_cursor)  # row 1, column col_cursor
+        start_cell = rowcol_to_a1(1, col_cursor)
         ws_int.update(start_cell, block, value_input_option="USER_ENTERED")
+        col_cursor += 2  # <-- NO spacer column
 
-
-        col_cursor += 3  # 2 cols data + 1 spacer
-
-    # ───────── EXTERNAL LINKS (horizontal layout)
+    # EXTERNAL (horizontal, no spacer)
     col_cursor = 1
     for source_url, data in external_blocks:
         block = _build_block_columns(
@@ -152,9 +126,6 @@ def write_results(
             data=data,
             simplify_links=False,
         )
-
         start_cell = rowcol_to_a1(1, col_cursor)
         ws_ext.update(start_cell, block, value_input_option="USER_ENTERED")
-
-
-        col_cursor += 3
+        col_cursor += 2  # <-- NO spacer column
